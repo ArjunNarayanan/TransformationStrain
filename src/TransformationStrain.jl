@@ -93,6 +93,21 @@ function normalContinuity(assembler::Assembler, scale_by::Float64,
 	end
 end
 
+function normalContinuity(assembler::Assembler, outer_product::Array{Float64, 2},
+	node_ids::AbstractArray; penalty = 1e6)
+
+	for i in 1:length(node_ids)
+		I = node_ids[i]
+		for j in (i+1):length(node_ids)
+			J = node_ids[j]
+			assembler.element_matrix[I,I] += penalty*outer_product
+			assembler.element_matrix[J,J] += penalty*outer_product
+			assembler.element_matrix[I,J] += -1.0*penalty*outer_product
+			assembler.element_matrix[J,I] += -1.0*penalty*outer_product
+		end
+	end
+end
+
 """
 	normalContinuity(nodes::Array{Float64, 2}, assembler::Assembler,
 	surfaceBasis::Basis{T2}, distance::Array{Float64, 1}) where {T2 <: Triangulation{M,2}} where {T1,M,spacedim}
@@ -114,6 +129,16 @@ function normalContinuity(nodes::Array{Float64, 2}, assembler::Assembler,
 	normalContinuity(assembler, -1.0, outer_product, lineMapping, parent_node_ids, product_node_ids)
 	normalContinuity(assembler, -1.0, outer_product, lineMapping, product_node_ids, parent_node_ids)
 	normalContinuity(assembler, 1.0, outer_product, lineMapping, product_node_ids, product_node_ids)
+end
+
+function normalContinuity(nodes::Array{Float64, 2}, assembler::Assembler,
+	surfaceBasis::Basis, distance::Array{Float64, 1})
+
+	point_on_interface = interfaceEdgeIntersection(nodes, distance, surfaceBasis)
+	normal = fitNormal(nodes, distance, point_on_interface)
+	outer_product = outer(normal, normal)
+	node_ids = 1:size(nodes)[2]
+	normalContinuity(assembler, outer_product, node_ids)
 end
 
 """
@@ -166,12 +191,12 @@ function assembleUniformMesh(distance::Array{Float64, 1}, mesh::Mesh{spacedim},
         min_level_set_value = minimum(distance[node_ids])
 		if max_level_set_value == min_level_set_value
 			error("Under-resolved interface")
-		elseif max_level_set_value*min_level_set_value < 0 && min_level_set_value < 0
+		elseif max_level_set_value*min_level_set_value <= 0 && min_level_set_value < 0
 			# Interface element
 			reinit(interface_assembler)
 			nodes = mesh[:nodes][:,node_ids]
-			normalContinuity(nodes, interface_assembler,
-				surfaceMapping.master.basis, lineMapping, distance[node_ids])
+			normalContinuity(nodes, interface_assembler, surfaceMapping.master.basis,
+				distance[node_ids])
 			updateSystemMatrix(system_matrix,
 				interface_assembler.element_matrix, node_ids,
 				interface_assembler.ndofs)
