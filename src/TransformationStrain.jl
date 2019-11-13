@@ -73,25 +73,21 @@ end
 
 """
 	normalContinuity(assembler::Assembler, scale_by::Float64,
-		lineMapping::Map{T1, 1, spacedim}, basis_values::Array{Float64, 2},
-		node_ids1::Array{Int64, 1}, node_ids2::Array{Int64, 1}) where {T1, spacedim}
+		outer_product::Array{Float64, 2}, node_ids1::Array{Int64, 1},
+		node_ids2::Array{Int64, 1}; penalty = 1e6) where {T1, spacedim}
 assemble the free slip constraint in `assembler.element_matrix[I,J]`, for `I`
 in `node_ids1` and `J` in `node_ids2`, multiplying the constraint by the
 `scale_by` factor.
 """
 function normalContinuity(assembler::Assembler, scale_by::Float64,
-	lineMapping::Map{T1, 1, spacedim}, basis_values::Array{Float64, 2},
-	node_ids1::Array{Int64, 1}, node_ids2::Array{Int64, 1}) where {T1, spacedim}
+	outer_product::Array{Float64, 2}, lineMapping, node_ids1::Array{Int64, 1},
+	node_ids2::Array{Int64, 1}; penalty = 1e6) where {T1, spacedim}
 
 	for q in eachindex(lineMapping.master.quadrature.points)
-		n = normal(lineMapping[:jacobian][q][:,1])
-		dv = lineMapping[:dx][q]
-		outer_product = outer(n, n)
+		w = lineMapping.master.quadrature.weights[q]
 		for I in node_ids1
-			NI = basis_values[I,q]
 			for J in node_ids2
-				NJ = basis_values[J,q]
-				assembler.element_matrix[I,J] += 1e6*scale_by*outer_product*dv
+				assembler.element_matrix[I,J] += penalty*scale_by*outer_product*w
 			end
 		end
 	end
@@ -99,34 +95,25 @@ end
 
 """
 	normalContinuity(nodes::Array{Float64, 2}, assembler::Assembler,
-		lineMapping::Map{T1, 1, spacedim}, surfaceBasis::Basis{T2},
-		distance::Array{Float64, 1}) where {T2 <: Triangulation{M,2}} where {T1,M,spacedim}
-constrain the normal component of the solution to be continuous on an element
-defined by `nodes`. The constraint is added into `assembler`. Continuity is
-enforced along the zero level set of `distance`. `lineMapping` is used to
-perform 1D quadrature. `surfaceBasis` defines the 2D basis on the element.
+	surfaceBasis::Basis{T2}, distance::Array{Float64, 1}) where {T2 <: Triangulation{M,2}} where {T1,M,spacedim}
+constrain the normal component of the solution to be continuous across an implicit
+interface. `distance` is the signed distance of each `nodes` to the interface.
+The normal to the interface is obtained by a best-fit hyperplane.
+The constraint is added into `assembler`.
 """
 function normalContinuity(nodes::Array{Float64, 2}, assembler::Assembler,
-	lineMapping::Map{T1, 1, spacedim}, surfaceBasis::Basis{T2},
+	surfaceBasis::Basis{T2}, lineMapping,
 	distance::Array{Float64, 1}) where {T2 <: Triangulation{M,2}} where {T1,M,spacedim}
 
-	interface_reference_endpoints = interfaceEdgeIntersection(distance,
-		surfaceBasis)
-	reinit(lineMapping, interface_reference_endpoints)
-	basis_values = evaluate(surfaceBasis, lineMapping[:coordinates])
-	interface_spatial_endpoints = interpolate(nodes,
-		interface_reference_endpoints, surfaceBasis)
-	reinit(lineMapping, interface_spatial_endpoints)
+	point_on_interface = interfaceEdgeIntersection(nodes, distance, surfaceBasis)
+	normal = fitNormal(nodes, distance, point_on_interface)
+	outer_product = outer(normal, normal)
 	parent_node_ids = findall(x -> x < 0, distance)
-	product_node_ids = findall(x -> x > 0, distance)
-	normalContinuity(assembler, 1.0, lineMapping, basis_values,
-		parent_node_ids, parent_node_ids)
-	normalContinuity(assembler, -1.0, lineMapping, basis_values,
-		parent_node_ids, product_node_ids)
-	normalContinuity(assembler, -1.0, lineMapping, basis_values,
-		product_node_ids, parent_node_ids)
-	normalContinuity(assembler, 1.0, lineMapping, basis_values,
-		product_node_ids, product_node_ids)
+	product_node_ids = findall(x -> x >= 0, distance)
+	normalContinuity(assembler, 1.0, outer_product, lineMapping, parent_node_ids, parent_node_ids)
+	normalContinuity(assembler, -1.0, outer_product, lineMapping, parent_node_ids, product_node_ids)
+	normalContinuity(assembler, -1.0, outer_product, lineMapping, product_node_ids, parent_node_ids)
+	normalContinuity(assembler, 1.0, outer_product, lineMapping, product_node_ids, product_node_ids)
 end
 
 """
@@ -177,28 +164,31 @@ function assembleUniformMesh(distance::Array{Float64, 1}, mesh::Mesh{spacedim},
         node_ids = mesh[:elements][elType][:, elem_id]
         max_level_set_value = maximum(distance[node_ids])
         min_level_set_value = minimum(distance[node_ids])
-        if max_level_set_value*min_level_set_value > 0
-            if max_level_set_value < 0
-                updateSystemMatrix(system_matrix,
-                    parent_assembler.element_matrix, node_ids,
-					parent_assembler.ndofs)
-            else
-                updateSystemMatrix(system_matrix,
-                    product_assembler.element_matrix, node_ids,
-					product_assembler.ndofs)
-				updateSystemRHS(system_rhs,
-					product_assembler.element_rhs, node_ids,
-					product_assembler.ndofs)
-            end
-        else
+		if max_level_set_value == min_level_set_value
+			error("Under-resolved interface")
+		elseif max_level_set_value*min_level_set_value < 0 && min_level_set_value < 0
+			# Interface element
 			reinit(interface_assembler)
 			nodes = mesh[:nodes][:,node_ids]
-			normalContinuity(nodes, interface_assembler, lineMapping,
-				surfaceMapping.master.basis, distance[node_ids])
+			normalContinuity(nodes, interface_assembler,
+				surfaceMapping.master.basis, lineMapping, distance[node_ids])
 			updateSystemMatrix(system_matrix,
 				interface_assembler.element_matrix, node_ids,
 				interface_assembler.ndofs)
-        end
+		elseif max_level_set_value < 0
+			# Parent element
+			updateSystemMatrix(system_matrix,
+				parent_assembler.element_matrix, node_ids,
+				parent_assembler.ndofs)
+		else
+			# Product element
+			updateSystemMatrix(system_matrix,
+				product_assembler.element_matrix, node_ids,
+				product_assembler.ndofs)
+			updateSystemRHS(system_rhs,
+				product_assembler.element_rhs, node_ids,
+				product_assembler.ndofs)
+		end
     end
 
 	system = GlobalSystem(system_matrix, system_rhs, spacedim, number_of_nodes)
