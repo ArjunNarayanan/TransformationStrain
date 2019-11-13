@@ -3,7 +3,7 @@ module TransformationStrain
 using TensorOperations, LinearAlgebra
 using FiniteElements, LevelSet, IsotropicElasticity
 
-export assembleUniformMesh
+export assembleUniformMesh, elementAveragedStrain
 
 
 """
@@ -219,6 +219,56 @@ function assembleUniformMesh(distance::Array{Float64, 1}, mesh::Mesh{spacedim},
 	system = GlobalSystem(system_matrix, system_rhs, spacedim, number_of_nodes)
 	return system
 end
+
+
+"""
+	updateStrain(strain::Array{Float64, 2}, elem_id::Int64,
+		node_ids::Array{Int64, 1}, nodes::Array{Float64, 2}, surfaceMapping::Map,
+		displacement::Array{Float64, 2})
+update `strain[:,elem_id]` with the element averaged strain.
+"""
+function updateStrain(strain::Array{Float64, 2}, elem_id::Int64,
+	node_ids::Array{Int64, 1}, nodes::Array{Float64, 2}, surfaceMapping::Map,
+	displacement::Array{Float64, 2})
+
+	reinit(surfaceMapping, nodes)
+	number_of_nodes = length(surfaceMapping.master.basis.functions)
+
+	for q in eachindex(surfaceMapping.master.quadrature.points)
+		w = surfaceMapping.master.quadrature.weights[q]/sum(surfaceMapping.master.quadrature.weights)
+		for I in 1:number_of_nodes
+			strain[1, elem_id] += surfaceMapping[:gradients][I,q][1]*displacement[1,node_ids[I]]*w
+			strain[2, elem_id] += 0.5*( surfaceMapping[:gradients][I,q][2]*displacement[1,node_ids[I]] +
+										surfaceMapping[:gradients][I,q][1]*displacement[2,node_ids[I]] )*w
+			strain[3, elem_id] += surfaceMapping[:gradients][I,q][2]*displacement[2,node_ids[I]]*w
+		end
+	end
+end
+
+"""
+	elementAveragedStrain(mesh::Mesh, displacement::Array{Float64, 2})
+compute the element averaged strain for the given `displacement` field on
+the elements of `mesh`.
+"""
+function elementAveragedStrain(mesh::Mesh{spacedim},
+	displacement::Array{Float64, 2}; q_order = 2) where spacedim
+
+	@assert spacedim == 2 "Only implemented for 2D problems"
+	elType = collect(keys(mesh[:element_groups]["surface"]))[1]
+	surfaceMapping = Map{elType,spacedim}(q_order, :gradients)
+
+	number_of_elmts = size(mesh[:elements][elType])[2]
+	strain = zeros(3, number_of_elmts)
+
+	for elem_id in 1:number_of_elmts
+		node_ids = mesh[:elements][elType][:,elem_id]
+		nodes = mesh[:nodes][:,node_ids]
+		updateStrain(strain, elem_id, node_ids, nodes, surfaceMapping,
+			displacement)
+	end
+	return strain
+end
+
 
 
 # module TransformationStrain ends here
