@@ -3,7 +3,7 @@ module TransformationStrain
 using TensorOperations, LinearAlgebra
 using FiniteElements, LevelSet, IsotropicElasticity
 
-export assembleUniformMesh, elementAveragedStrain
+export assembleUniformMesh, elementAveragedStrain, resetLevelSet
 
 
 """
@@ -220,6 +220,61 @@ function assembleUniformMesh(distance::Array{Float64, 1}, mesh::Mesh{spacedim},
 	return system
 end
 
+"""
+	zeroLevelSetPointsAndNormals(distance::Array{Float64, 1},
+		mesh::Mesh{spacedim}) where spacedim
+for each element in the mesh which has a non-zero intersection with the
+zero level set of the interpolation of `distance`, perform
+- project the element centroid onto the zero level set
+- compute the normal (via the gradient of `distance`) at this projected point
+returns the set of projected points and corresponding normals.
+"""
+function zeroLevelSetPointsAndNormals(distance::Array{Float64, 1},
+	mesh::Mesh{spacedim}) where spacedim
+
+	elTypes = collect(keys(mesh[:element_groups]["surface"]))
+	@assert length(elTypes) == 1 "Mesh has to have uniform element types"
+
+	elType = elTypes[1]
+	interface_elements = Int[]
+
+	for elem_id in mesh[:element_groups]["surface"][elType]
+		node_ids = mesh[:elements][elType][:, elem_id]
+		if hasInterface(distance[node_ids])
+			push!(interface_elements, elem_id)
+		end
+	end
+
+	num_interface_elements = length(interface_elements)
+	projected_points = zeros(spacedim, num_interface_elements)
+	projected_normals = zeros(spacedim, num_interface_elements)
+	surfaceBasis = Basis(elType)
+
+	count = 1
+	for elem_id in interface_elements
+		node_ids = mesh[:elements][elType][:, elem_id]
+		nodes = mesh[:nodes][:,node_ids]
+		point, normal = projectCentroidAndComputeNormal(nodes,
+			distance[node_ids], surfaceBasis)
+		projected_points[:,count] = point
+		projected_normals[:,count] = normal
+		count += 1
+	end
+
+	return projected_points, projected_normals
+end
+
+"""
+	resetLevelSet(level_set::Array{Float64, 1}, mesh::Mesh)
+return the signed distance from each node in `mesh` to the zero level set of
+`level_set`.
+"""
+function resetLevelSet(level_set::Array{Float64, 1}, mesh::Mesh)
+	points, normals = zeroLevelSetPointsAndNormals(level_set, mesh)
+	nearest_idx = nearestNeighbor(points, mesh[:nodes])
+	distance = signedDistance(mesh[:nodes], points, normals, nearest_idx)
+	return distance
+end
 
 """
 	updateStrain(strain::Array{Float64, 2}, elem_id::Int64,
